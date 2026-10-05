@@ -1,0 +1,4 @@
+# Para Orange Pi, prefira os pacotes APT descritos no README.md.
+# Estas dependências são úteis para teste em um Linux de desenvolvimento.
+opencv-python>=4.8
+gpiod>=2.0; platform_system == "Linux"
