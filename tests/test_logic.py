@@ -7,7 +7,7 @@ import numpy as np
 
 from camera_stream import CameraStream, profiles
 from gpio_button import PressDetector
-from main import center_zoom, parse_args
+from main import center_zoom, next_zoom_level, parse_args
 
 
 class LupaTests(unittest.TestCase):
@@ -23,6 +23,26 @@ class LupaTests(unittest.TestCase):
         zoomed = center_zoom(image, 2)
         self.assertEqual(zoomed.shape, image.shape)
         np.testing.assert_array_equal(zoomed[0, 0], image[1, 1])
+
+    def test_zoom_cycle_to_eight_and_back(self):
+        level = 1
+        levels = []
+        for _ in range(9):
+            level = next_zoom_level(level, 8)
+            levels.append(level)
+        self.assertEqual(levels, [2, 3, 4, 5, 6, 7, 8, 1, 2])
+
+    def test_zoom_maximum_option_and_alias(self):
+        self.assertEqual(parse_args([]).max_zoom, 8)
+        self.assertEqual(parse_args(["--max-zoom", "5"]).max_zoom, 5)
+        self.assertEqual(parse_args(["--zoom-factor", "6"]).max_zoom, 6)
+        self.assertEqual(next_zoom_level(3, 3), 1)
+        with self.assertRaises(ValueError):
+            next_zoom_level(1, 1)
+
+    def test_zoom_eight_keeps_frame_size(self):
+        image = np.zeros((72, 128, 3), dtype=np.uint8)
+        self.assertEqual(center_zoom(image, 8).shape, image.shape)
 
     def test_capture_profiles_have_fallback(self):
         p = profiles(1280, 720, 30)

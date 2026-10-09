@@ -1,6 +1,6 @@
 # Lupa Digital — Orange Pi 3 LTS
 
-Visualizador leve de webcam com zoom digital 1×/2× controlado por push button, otimizado para Linux ARM com ambiente gráfico X11.
+Visualizador leve de webcam com zoom digital progressivo de 1× até 8× controlado por push button, otimizado para Linux ARM com ambiente gráfico X11.
 
 ## Configuração para o hardware testado
 
@@ -30,8 +30,9 @@ cd ~/lupa-digital
 python3 main.py
 ```
 
-- **Botão físico:** um clique ativa zoom de 2×, outro volta para 1×.
-- **Espaço:** alternativa para testar o zoom sem o botão.
+- **Botão físico:** cada clique avança **1× → 2× → 3× → 4× → 5× → 6× → 7× → 8× → 1×** (e repete).
+- **Espaço:** executa a mesma sequência do botão, para teste pelo teclado.
+- **Limite personalizável:** `--max-zoom 8` ou `ZOOM_MAX=8` no ambiente.
 - **Esc / Q:** encerra o programa.
 - **Tela cheia:** comportamento padrão. Passe `--windowed` para janela menor.
 
@@ -47,6 +48,7 @@ Para selecionar manualmente uma câmera ou ajustar desempenho:
 python3 main.py --camera /dev/video1 --width 1280 --height 720 --fps 20
 python3 main.py --camera /dev/video1 --width 640 --height 480 --fps 15 --windowed
 python3 main.py --gpio-chip /dev/gpiochip1 --gpio-line 230
+python3 main.py --max-zoom 8
 ```
 
 ## Diagnóstico
@@ -81,7 +83,7 @@ python3 -m unittest discover -s tests -v
 
 ## Estrutura
 
-- `main.py` — interface em tela cheia, zoom e teclado
+- `main.py` — interface em tela cheia, zoom progressivo de 1× a 8× e teclado
 - `camera_stream.py` — captura em segundo plano e recuperação da câmera
 - `gpio_button.py` — leitura do botão `libgpiod` 1.x/2.x com debounce
 - `config.py` — valores padrão personalizáveis via variáveis de ambiente
