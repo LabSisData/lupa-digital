@@ -1,118 +1,89 @@
-# Orange Pi Camera Zoom
+# Lupa Digital — Orange Pi 3 LTS
 
-Projeto mínimo para o Orange Pi 3 LTS:
+Visualizador leve de webcam com zoom digital 1×/2× controlado por push button, otimizado para Linux ARM com ambiente gráfico X11.
 
-- câmera USB em 1280×720;
-- janela em tela cheia;
-- um botão físico alterna entre imagem normal (1×) e zoom central (2×);
-- tecla `Espaço` também alterna o zoom durante os testes;
-- tecla `Esc` ou `Q` fecha o programa.
+## Configuração para o hardware testado
 
-## Hardware
+- Câmera: **`/dev/video1`** (padrão; alterável por `--camera`)
+- Captura preferencial: **1280×720 / 30 FPS / MJPEG**, com fallback para YUYV e 640×480 se necessário
+- Botão de 4 pernas: **pino físico 21** (sinal, PH6) e **pino físico 6** (GND)
+- Controlador GPIO: **`/dev/gpiochip1`**, linha **`230`** (offset `libgpiod`, **não** `wPi` 12)
+- Pull-up no GPIO: solicitado pelo programa; se o driver não oferecer, instale resistor de 10 kΩ entre o sinal e **3,3 V**. Nunca aplique 5 V em um GPIO.
 
-- Orange Pi 3 LTS;
-- sistema Linux com ambiente gráfico X11;
-- câmera USB/UVC que suporte 1280×720;
-- botão momentâneo normalmente aberto;
-- fios para um GPIO e GND.
+Conecte o botão entre o sinal e GND, sem alimentação externa. Para botões de quatro pernas, escolha pernas que só se conectem ao pressionar (a orientação pode variar).
 
-O botão deve ficar entre o GPIO escolhido e o GND. O programa usa pull-up interno quando o `libgpiod` 2.x estiver disponível. Se o sistema não oferecer pull-up interno, use um resistor de aproximadamente 10 kΩ entre o GPIO e 3,3 V.
-
-**Nunca aplique 5 V em um GPIO do Orange Pi.**
-
-## Requisitos no Orange Pi
-
-O instalador usa os pacotes do sistema, pois eles funcionam melhor na arquitetura ARM do Orange Pi:
+## Instalação no Orange Pi
 
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-opencv python3-libgpiod gpiod v4l-utils
-sudo usermod -aG video "$USER"
-```
-
-Depois, encerre a sessão e entre novamente para o grupo `video` ser aplicado.
-
-Em sistemas que ainda usam libgpiod 1.x, o pacote pode ter outro nome. Tente:
-
-```bash
-apt search python3-libgpiod
-```
-
-O programa possui compatibilidade com as APIs 1.x e 2.x do libgpiod.
-
-Confira a câmera:
-
-```bash
-v4l2-ctl --list-devices
-v4l2-ctl --list-formats-ext -d /dev/video0
-```
-
-Confira os GPIOs disponíveis:
-
-```bash
-gpioinfo
-```
-
-O projeto usa `/dev/gpiochip0` e linha `6` por padrão apenas como exemplo. Altere a linha para a que corresponde ao seu pino físico. O número mostrado por `gpioinfo` é um **offset lógico**, e não necessariamente o número escrito no conector físico da placa.
-
-## Instalação
-
-Na pasta do projeto:
-
-```bash
+git clone https://github.com/LabSisData/lupa-digital.git
+cd lupa-digital
 chmod +x install_orangepi.sh
 ./install_orangepi.sh
 ```
 
-## Configuração e execução
+O script instala OpenCV, NumPy, libgpiod e ferramentas V4L2, configura acesso aos GPIOs pelo grupo `gpio` e adiciona o usuário ao grupo `video`. **Saia da sessão e entre novamente, ou reinicie**, para os grupos terem efeito.
 
-Exemplo usando a câmera `/dev/video0`, o chip padrão e a linha GPIO 6:
-
-```bash
-python3 main.py --camera /dev/video0 --gpio-chip /dev/gpiochip0 --gpio-line 6
-```
-
-Se quiser testar somente a câmera sem botão:
+## Executar
 
 ```bash
-python3 main.py --camera /dev/video0 --no-gpio
-```
-
-Se a câmera estiver em outro dispositivo:
-
-```bash
-python3 main.py --camera /dev/video2 --gpio-line 6
-```
-
-Também é possível configurar por variáveis de ambiente:
-
-```bash
-export CAMERA_DEVICE=/dev/video0
-export GPIO_CHIP=/dev/gpiochip0
-export GPIO_LINE=6
-export ZOOM_FACTOR=2.0
+cd ~/lupa-digital
 python3 main.py
 ```
 
-## Teste rápido do botão
+- **Botão físico:** um clique ativa zoom de 2×, outro volta para 1×.
+- **Espaço:** alternativa para testar o zoom sem o botão.
+- **Esc / Q:** encerra o programa.
+- **Tela cheia:** comportamento padrão. Passe `--windowed` para janela menor.
 
-Antes de executar o programa, confira se o GPIO muda ao pressionar o botão:
+Para testar apenas a câmera:
 
 ```bash
-gpiomon --num-events 5 /dev/gpiochip0 6
+python3 main.py --no-gpio --windowed
 ```
 
-Se o comando não detectar nada, o número usado é provavelmente o offset lógico incorreto ou o botão está ligado em outro pino.
+Para selecionar manualmente uma câmera ou ajustar desempenho:
 
-## Observações de desempenho
+```bash
+python3 main.py --camera /dev/video1 --width 1280 --height 720 --fps 20
+python3 main.py --camera /dev/video1 --width 640 --height 480 --fps 15 --windowed
+python3 main.py --gpio-chip /dev/gpiochip1 --gpio-line 230
+```
 
-O projeto mantém o buffer da câmera pequeno para evitar atraso, solicita MJPEG quando a câmera oferece esse formato e faz o corte do zoom antes de redimensionar para a tela. O zoom é digital: ele amplia a região central da imagem, não altera a lente.
+## Diagnóstico
 
-## Arquivos
+**A tela não mostra vídeo:** espere alguns segundos. Em vez de ficar branca, a nova versão mostra uma mensagem enquanto procura um formato suportado. Use `v4l2-ctl --list-devices` e `v4l2-ctl --list-formats-ext -d /dev/video1` para conferir a webcam. Feche outros aplicativos que possam estar usando a câmera. Se só funcionar em 640×480, ela talvez não suporte 720p no formato selecionado.
 
-- `main.py`: captura, tela cheia, zoom e controle do botão.
-- `gpio_button.py`: leitura do botão usando libgpiod 1.x ou 2.x.
-- `config.py`: valores padrão e variáveis de ambiente.
-- `install_orangepi.sh`: instalação dos requisitos do Orange Pi.
-- `requirements.txt`: dependências para teste com pip em computador Linux.
-- `requirements-orange-pi.txt`: lista dos pacotes recomendados do sistema.
+**Botão não funciona:** primeiro teste o circuito sem o aplicativo:
+
+```bash
+sudo gpio mode 12 in
+sudo gpio mode 12 up
+while true; do gpio read 12; sleep 0.2; done
+```
+
+O sinal deve ser `1` quando solto e `0` quando pressionado. Pressione `Ctrl+C` para parar. No código Python, use **chip1 / linha 230**, não `wPi 12`. Para conferir:
+
+```bash
+sudo gpioinfo gpiochip1 | grep -E 'line +230:'
+ls -l /dev/gpiochip*
+groups
+```
+
+Se o GPIO estiver indisponível (por exemplo, por permissões), a aplicação mantém a câmera funcionando e permite alternar o zoom por **Espaço**.
+
+**Vídeo lento:** o programa captura em uma thread separada e exibe sempre o quadro mais recente. Experimente `--fps 15` ou `--width 640 --height 480` se a CPU estiver sobrecarregada. O desempenho final depende da webcam, do driver e do ambiente gráfico.
+
+## Testes (não exigem hardware)
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+## Estrutura
+
+- `main.py` — interface em tela cheia, zoom e teclado
+- `camera_stream.py` — captura em segundo plano e recuperação da câmera
+- `gpio_button.py` — leitura do botão `libgpiod` 1.x/2.x com debounce
+- `config.py` — valores padrão personalizáveis via variáveis de ambiente
+- `install_orangepi.sh` — dependências e permissões
+- `tests/test_logic.py` — testes automatizados da lógica

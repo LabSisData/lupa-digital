@@ -1,152 +1,151 @@
-"""Botão GPIO compatível com libgpiod 1.x e 2.x."""
+"""Leitura por polling de botão ativo em LOW (GND), libgpiod 1.x e 2.x.
 
+O polling evita dependência de suporte a interrupções de borda no driver.
+Um clique é gerado quando o sinal fica LOW de maneira estável.
+"""
 from __future__ import annotations
 
 import threading
 import time
-from datetime import timedelta
+
+
+class PressDetector:
+    """Debounce de borda: uma ativação a cada ciclo de pressionar/soltar."""
+
+    def __init__(self, debounce_ms: int = 80):
+        self.delay = max(10, debounce_ms) / 1000.0
+        self.stable = True  # HIGH: botão solto (pull-up)
+        self.candidate = None
+        self.changed_at = 0.0
+
+    def update(self, high: bool, now: float) -> bool:
+        if high == self.stable:
+            self.candidate = None
+            return False
+        if self.candidate != high:
+            self.candidate = high
+            self.changed_at = now
+            return False
+        if now - self.changed_at < self.delay:
+            return False
+        self.stable = high
+        self.candidate = None
+        return not high
 
 
 class GPIOButton:
-    """Transforma uma borda de descida do GPIO em eventos de pressionamento."""
-
-    def __init__(self, chip_path: str, line_offset: int, debounce_ms: int = 120):
+    def __init__(self, chip_path: str, line_offset: int, debounce_ms: int = 80):
         try:
             import gpiod
         except ImportError as exc:
-            raise RuntimeError(
-                "gpiod não está instalado. Instale python3-libgpiod."
-            ) from exc
+            raise RuntimeError("Instale python3-libgpiod para ler o botão") from exc
 
-        self._gpiod = gpiod
         self._chip_path = chip_path
         self._line_offset = line_offset
-        self._debounce_seconds = debounce_ms / 1000.0
-        self._last_press = 0.0
-        self._pressed = threading.Event()
-        self._stop = threading.Event()
-        self._request = None
-        self._line = None
         self._chip = None
-        self._api_version = 2 if hasattr(gpiod, "request_lines") else 1
-
-        if self._api_version == 2:
-            self._setup_v2()
-        else:
-            self._setup_v1()
-
-        self._thread = threading.Thread(target=self._read_loop, daemon=True)
-        self._thread.start()
-
-    def _setup_v2(self) -> None:
-        import gpiod
+        self._line = None
+        self._request = None
+        self._stop = threading.Event()
+        self._pressed = threading.Event()
+        self._detector = PressDetector(debounce_ms)
+        self._error = None
+        self._gpiod = gpiod
+        self._v2 = hasattr(gpiod, "request_lines")
 
         try:
-            from gpiod.line import Bias, Direction, Edge
-        except ImportError:
-            Bias = gpiod.Bias
-            Direction = gpiod.Direction
-            Edge = gpiod.Edge
+            if self._v2:
+                self._setup_v2()
+            else:
+                self._setup_v1()
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.close()
+            raise RuntimeError(
+                f"Não foi possível configurar {chip_path}, linha {line_offset}: {exc}"
+            ) from exc
 
-        settings = gpiod.LineSettings(
-            direction=Direction.INPUT,
-            edge_detection=Edge.FALLING,
-            bias=Bias.PULL_UP,
-            debounce_period=timedelta(
-                milliseconds=max(0, int(self._debounce_seconds * 1000))
-            ),
-        )
-        self._request = gpiod.request_lines(
-            self._chip_path,
-            consumer="orangepi-camera-zoom",
-            config={self._line_offset: settings},
-        )
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
 
-    def _setup_v1(self) -> None:
+    def _setup_v2(self):
+        from gpiod.line import Bias, Direction
+        gpiod = self._gpiod
+        for bias in (Bias.PULL_UP, Bias.AS_IS):
+            try:
+                self._request = gpiod.request_lines(
+                    self._chip_path,
+                    consumer="lupa-digital",
+                    config={self._line_offset: gpiod.LineSettings(
+                        direction=Direction.INPUT, bias=bias
+                    )},
+                )
+                if bias == Bias.AS_IS:
+                    print("Aviso: pull-up interno indisponível. Use resistor de 10 kΩ para 3,3 V.")
+                return
+            except (OSError, ValueError):
+                if bias == Bias.AS_IS:
+                    raise
+
+    def _setup_v1(self):
         gpiod = self._gpiod
         self._chip = gpiod.Chip(self._chip_path)
         self._line = self._chip.get_line(self._line_offset)
-        flags = getattr(gpiod, "LINE_REQ_FLAG_BIAS_PULL_UP", 0)
-        self._line.request(
-            consumer="orangepi-camera-zoom",
-            type=gpiod.LINE_REQ_EV_FALLING_EDGE,
-            flags=flags,
-        )
+        for flags in (getattr(gpiod, "LINE_REQ_FLAG_BIAS_PULL_UP", 0), 0):
+            try:
+                self._line.request(consumer="lupa-digital", type=gpiod.LINE_REQ_DIR_IN, flags=flags)
+                if flags == 0:
+                    print("Aviso: confirme o pull-up do GPIO; resistor externo 10 kΩ pode ser necessário.")
+                return
+            except (OSError, ValueError):
+                if flags == 0:
+                    raise
 
-    def _register_press(self) -> None:
-        now = time.monotonic()
-        if now - self._last_press >= self._debounce_seconds:
-            self._last_press = now
-            self._pressed.set()
+    def _read_high(self) -> bool:
+        if self._v2:
+            value = self._request.get_value(self._line_offset)
+            return int(getattr(value, "value", value)) == 1
+        return self._line.get_value() == 1
 
-    def _read_loop(self) -> None:
-        if self._api_version == 2:
-            self._read_loop_v2()
-        else:
-            self._read_loop_v1()
-
-    def _read_loop_v2(self) -> None:
+    def _poll(self):
         try:
-            while not self._stop.is_set():
-                events = self._request.read_edge_events()
-                for event in events:
-                    if self._stop.is_set():
-                        return
-                    event_type = getattr(event, "event_type", None)
-                    falling = getattr(event_type, "name", "") == "FALLING_EDGE"
-                    if falling or event_type is None:
-                        self._register_press()
-        except (OSError, RuntimeError, ValueError):
-            if not self._stop.is_set():
-                self._stop.set()
-
-    def _read_loop_v1(self) -> None:
-        try:
-            while not self._stop.is_set():
-                if not self._line.event_wait(sec=1):
-                    continue
-                self._line.event_read()
-                self._register_press()
-        except (OSError, RuntimeError, ValueError):
-            if not self._stop.is_set():
-                self._stop.set()
+            while not self._stop.wait(0.015):
+                if self._detector.update(self._read_high(), time.monotonic()):
+                    self._pressed.set()
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._error = str(exc)
+            self._stop.set()
 
     def was_pressed(self) -> bool:
-        """Retorna True uma vez para cada toque detectado."""
-        if not self._pressed.wait(timeout=0):
-            return False
-        self._pressed.clear()
-        return True
+        if self._pressed.is_set():
+            self._pressed.clear()
+            return True
+        return False
 
-    def close(self) -> None:
+    def status_error(self) -> str | None:
+        return self._error
+
+    def close(self):
         self._stop.set()
-        try:
-            if self._request is not None:
-                self._request.release()
-            if self._line is not None:
-                self._line.release()
-            if self._chip is not None:
-                self._chip.close()
-        except (OSError, RuntimeError, AttributeError):
-            pass
+        for obj, method in ((self._request, "release"), (self._line, "release"), (self._chip, "close")):
+            if obj is not None:
+                try:
+                    getattr(obj, method)()
+                except (OSError, ValueError, RuntimeError):
+                    pass
+        self._request = self._line = self._chip = None
 
 
 class DisabledButton:
-    """Implementação vazia para testar a câmera sem GPIO."""
-
     def was_pressed(self) -> bool:
         return False
 
-    def close(self) -> None:
+    def status_error(self) -> str | None:
+        return None
+
+    def close(self):
         pass
 
 
-def create_button(
-    enabled: bool,
-    chip_path: str,
-    line_offset: int,
-    debounce_ms: int,
-) -> GPIOButton | DisabledButton:
+def create_button(enabled: bool, chip_path: str, line_offset: int, debounce_ms: int):
     if not enabled:
         return DisabledButton()
     return GPIOButton(chip_path, line_offset, debounce_ms)
