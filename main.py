@@ -1,5 +1,4 @@
-"""Visualizador de câmera 720p com zoom alternado por botão GPIO."""
-
+"""Lupa Digital para Orange Pi 3 LTS: câmera fluida, zoom por botão e teclado."""
 from __future__ import annotations
 
 import argparse
@@ -7,112 +6,123 @@ import sys
 import time
 
 import cv2
+import numpy as np
 
 import config
-from gpio_button import create_button
+from camera_stream import CameraStream
+from gpio_button import DisabledButton, create_button
 
-
-WINDOW_NAME = "Orange Pi Camera"
+WINDOW = "Lupa Digital - Orange Pi"
 
 
 def center_zoom(frame, factor: float):
     if factor <= 1.0:
         return frame
-
-    height, width = frame.shape[:2]
-    crop_width = max(1, int(width / factor))
-    crop_height = max(1, int(height / factor))
-    left = max(0, (width - crop_width) // 2)
-    top = max(0, (height - crop_height) // 2)
-    cropped = frame[top : top + crop_height, left : left + crop_width]
-    return cv2.resize(cropped, (width, height), interpolation=cv2.INTER_LINEAR)
+    h, w = frame.shape[:2]
+    cut_w, cut_h = max(1, round(w / factor)), max(1, round(h / factor))
+    x, y = (w - cut_w) // 2, (h - cut_h) // 2
+    return cv2.resize(frame[y:y+cut_h, x:x+cut_w], (w, h), interpolation=cv2.INTER_LINEAR)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--camera", default=config.CAMERA_DEVICE)
-    parser.add_argument("--width", type=int, default=config.CAMERA_WIDTH)
-    parser.add_argument("--height", type=int, default=config.CAMERA_HEIGHT)
-    parser.add_argument("--fps", type=int, default=config.CAMERA_FPS)
-    parser.add_argument("--gpio-chip", default=config.GPIO_CHIP)
-    parser.add_argument("--gpio-line", type=int, default=config.GPIO_LINE)
-    parser.add_argument("--zoom-factor", type=float, default=config.ZOOM_FACTOR)
-    parser.add_argument("--debounce-ms", type=int, default=config.BUTTON_DEBOUNCE_MS)
-    parser.add_argument("--no-gpio", action="store_true", help="desliga o botão físico")
-    parser.add_argument("--windowed", action="store_true", help="não inicia em tela cheia")
-    return parser.parse_args()
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--camera", default=config.CAMERA_DEVICE)
+    p.add_argument("--width", type=int, default=config.CAMERA_WIDTH)
+    p.add_argument("--height", type=int, default=config.CAMERA_HEIGHT)
+    p.add_argument("--fps", type=int, default=config.CAMERA_FPS)
+    p.add_argument("--gpio-chip", default=config.GPIO_CHIP)
+    p.add_argument("--gpio-line", type=int, default=config.GPIO_LINE)
+    p.add_argument("--zoom-factor", type=float, default=config.ZOOM_FACTOR)
+    p.add_argument("--debounce-ms", type=int, default=config.BUTTON_DEBOUNCE_MS)
+    p.add_argument("--no-gpio", action="store_true")
+    p.add_argument("--windowed", action="store_true")
+    return p.parse_args(argv)
 
 
-def open_camera(device: str, width: int, height: int, fps: int) -> cv2.VideoCapture:
-    camera = cv2.VideoCapture(device, cv2.CAP_V4L2)
-    if not camera.isOpened():
-        camera.release()
-        camera = cv2.VideoCapture(device)
-
-    if not camera.isOpened():
-        raise RuntimeError(f"Não foi possível abrir a câmera {device}.")
-
-    # Buffer pequeno = menos atraso entre a cena real e a imagem exibida.
-    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    camera.set(cv2.CAP_PROP_FPS, fps)
-    return camera
+def status_screen(message: str):
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    cv2.putText(frame, "Lupa Digital - Orange Pi", (30, 115),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, (240, 240, 240), 2, cv2.LINE_AA)
+    cv2.putText(frame, message[:65], (30, 185),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (170, 210, 255), 1, cv2.LINE_AA)
+    cv2.putText(frame, "ESC/Q: sair | ESPACO: zoom", (30, 240),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1, cv2.LINE_AA)
+    return frame
 
 
-def run(args: argparse.Namespace) -> int:
-    camera = open_camera(args.camera, args.width, args.height, args.fps)
-    button = create_button(
-        enabled=config.GPIO_ENABLED and not args.no_gpio,
-        chip_path=args.gpio_chip,
-        line_offset=args.gpio_line,
-        debounce_ms=args.debounce_ms,
-    )
+def run(args):
+    if args.zoom_factor < 1.0 or args.width < 1 or args.height < 1 or args.fps < 1:
+        raise ValueError("Zoom deve ser >= 1; largura, altura e FPS devem ser positivos")
 
-    zoomed = False
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    if not args.windowed:
-        cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
+    button = DisabledButton()
+    camera = None
     try:
-        while True:
-            ok, frame = camera.read()
-            if not ok:
-                print("Aviso: não foi possível ler um frame; tentando novamente...", file=sys.stderr)
-                time.sleep(0.05)
-                continue
+        if config.GPIO_ENABLED and not args.no_gpio:
+            try:
+                button = create_button(True, args.gpio_chip, args.gpio_line, args.debounce_ms)
+                print(f"Botão conectado: {args.gpio_chip} linha {args.gpio_line}")
+            except (OSError, ValueError, RuntimeError) as exc:
+                print(f"Aviso: botão não disponível: {exc}. Use ESPAÇO para zoom.", file=sys.stderr)
 
+        camera = CameraStream(args.camera, args.width, args.height, args.fps)
+        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+        cv2.imshow(WINDOW, status_screen("Aguardando primeiro quadro da câmera..."))
+        cv2.waitKey(1)
+        if args.windowed:
+            cv2.resizeWindow(WINDOW, 960, 540)
+        else:
+            cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+        zoomed = False
+        last_seq = -1
+        last_status = 0.0
+        while True:
             if button.was_pressed():
                 zoomed = not zoomed
+                print(f"Zoom {'ATIVADO' if zoomed else 'DESATIVADO'}")
+            error = button.status_error()
+            if error:
+                print(f"Aviso: GPIO parou: {error}", file=sys.stderr)
+                button.close()
+                button = DisabledButton()
 
-            displayed = center_zoom(frame, args.zoom_factor if zoomed else 1.0)
-            cv2.imshow(WINDOW_NAME, displayed)
+            frame, timestamp, seq = camera.latest()
+            now = time.monotonic()
+            if frame is not None and now - timestamp < 1.5:
+                if seq != last_seq:
+                    displayed = center_zoom(frame, args.zoom_factor if zoomed else 1.0)
+                    cv2.putText(displayed, f"{args.zoom_factor:g}x" if zoomed else "1x",
+                                (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                                (0, 220, 70), 2, cv2.LINE_AA)
+                    cv2.imshow(WINDOW, displayed)
+                    last_seq = seq
+            elif now - last_status >= 0.5:
+                cv2.imshow(WINDOW, status_screen(camera.status))
+                last_status = now
+                last_seq = -1
 
-            # waitKey é necessário para a janela processar eventos e também
-            # permite testar o botão com Espaço sem adicionar outra interface.
-            key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKey(15) & 0xFF
             if key in (27, ord("q"), ord("Q")):
                 break
             if key == 32:
                 zoomed = not zoomed
+                last_seq = -1
+        return 0
     finally:
         button.close()
-        camera.release()
+        if camera is not None:
+            camera.close()
         cv2.destroyAllWindows()
 
-    return 0
 
-
-def main() -> int:
-    args = parse_args()
+def main():
     try:
-        return run(args)
-    except KeyboardInterrupt:
-        return 0
-    except RuntimeError as exc:
+        return run(parse_args())
+    except (RuntimeError, ValueError, cv2.error) as exc:
         print(f"Erro: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        return 0
 
 
 if __name__ == "__main__":
