@@ -24,6 +24,13 @@ def center_zoom(frame, factor: float):
     return cv2.resize(frame[y:y+cut_h, x:x+cut_w], (w, h), interpolation=cv2.INTER_LINEAR)
 
 
+def next_zoom_level(current: int, max_zoom: int = 8) -> int:
+    """Cada toque avança um nível; após o máximo, volta para a imagem normal."""
+    if max_zoom < 2:
+        raise ValueError("O zoom máximo deve ser pelo menos 2x")
+    return 1 if current >= max_zoom else current + 1
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--camera", default=config.CAMERA_DEVICE)
@@ -32,7 +39,9 @@ def parse_args(argv=None):
     p.add_argument("--fps", type=int, default=config.CAMERA_FPS)
     p.add_argument("--gpio-chip", default=config.GPIO_CHIP)
     p.add_argument("--gpio-line", type=int, default=config.GPIO_LINE)
-    p.add_argument("--zoom-factor", type=float, default=config.ZOOM_FACTOR)
+    p.add_argument("--max-zoom", "--zoom-factor", dest="max_zoom", type=int,
+                   default=config.ZOOM_MAX,
+                   help="zoom máximo; cada toque avança 1x até o máximo (padrão: 8)")
     p.add_argument("--debounce-ms", type=int, default=config.BUTTON_DEBOUNCE_MS)
     p.add_argument("--no-gpio", action="store_true")
     p.add_argument("--windowed", action="store_true")
@@ -51,8 +60,8 @@ def status_screen(message: str):
 
 
 def run(args):
-    if args.zoom_factor < 1.0 or args.width < 1 or args.height < 1 or args.fps < 1:
-        raise ValueError("Zoom deve ser >= 1; largura, altura e FPS devem ser positivos")
+    if args.max_zoom < 2 or args.width < 1 or args.height < 1 or args.fps < 1:
+        raise ValueError("Zoom máximo deve ser >= 2; largura, altura e FPS devem ser positivos")
 
     button = DisabledButton()
     camera = None
@@ -73,13 +82,14 @@ def run(args):
         else:
             cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-        zoomed = False
+        zoom_level = 1
         last_seq = -1
         last_status = 0.0
         while True:
             if button.was_pressed():
-                zoomed = not zoomed
-                print(f"Zoom {'ATIVADO' if zoomed else 'DESATIVADO'}")
+                zoom_level = next_zoom_level(zoom_level, args.max_zoom)
+                last_seq = -1
+                print(f"Zoom: {zoom_level}x")
             error = button.status_error()
             if error:
                 print(f"Aviso: GPIO parou: {error}", file=sys.stderr)
@@ -90,8 +100,8 @@ def run(args):
             now = time.monotonic()
             if frame is not None and now - timestamp < 1.5:
                 if seq != last_seq:
-                    displayed = center_zoom(frame, args.zoom_factor if zoomed else 1.0)
-                    cv2.putText(displayed, f"{args.zoom_factor:g}x" if zoomed else "1x",
+                    displayed = center_zoom(frame, zoom_level)
+                    cv2.putText(displayed, f"{zoom_level}x",
                                 (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                                 (0, 220, 70), 2, cv2.LINE_AA)
                     cv2.imshow(WINDOW, displayed)
@@ -105,8 +115,9 @@ def run(args):
             if key in (27, ord("q"), ord("Q")):
                 break
             if key == 32:
-                zoomed = not zoomed
+                zoom_level = next_zoom_level(zoom_level, args.max_zoom)
                 last_seq = -1
+                print(f"Zoom: {zoom_level}x")
         return 0
     finally:
         button.close()
